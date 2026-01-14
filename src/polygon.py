@@ -62,8 +62,8 @@ class Polygon():
         if self._images_loaded:
             return
         try:
-            wood = pygame.image.load("wood.png").convert_alpha()
-            wood2 = pygame.image.load("wood2.png").convert_alpha()
+            wood = pygame.image.load("../resources/images/wood.png").convert_alpha()
+            wood2 = pygame.image.load("../resources/images/wood2.png").convert_alpha()
             rect = pygame.Rect(251, 357, 86, 22)
             self.beam_image = wood.subsurface(rect).copy()
             rect = pygame.Rect(16, 252, 22, 84)

@@ -135,6 +135,7 @@ GREEN = (0, 255, 0)
 YELLOW = (255, 255, 0)
 GRAY = (128, 128, 128)
 DARK_BLUE = (30, 60, 100)
+ORANGE = (255, 165, 0)
 
 # 弹弓位置
 sling_x, sling_y = 135, 450
@@ -155,7 +156,16 @@ placed_static_bodies = []  # 存储布防阶段放置的静态物体
 
 # 放置区域限制
 PLACE_ZONE_LEFT = 600  # 只能在此x坐标右侧放置
-PLACE_ZONE_BOTTOM = 60  # 地面高度
+PLACE_ZONE_BOTTOM = 60  # 地面高度（pymunk坐标系）
+GROUND_Y_PYGAME = 540  # 地面Y坐标（pygame坐标系，540 = 600-60）
+
+# 物理稳定期变量 - 防止开局自爆
+physics_activation_time = 0  # 物理激活时间戳
+PHYSICS_STABILIZE_DURATION = 2.0  # 稳定期持续秒数
+
+# 进攻阶段计时器
+ATTACK_TIME_LIMIT = 180  # 进攻阶段时间限制（秒）
+attack_start_time = 0
 
 # 字体
 bold_font = pygame.font.SysFont("arial", 30, bold=True)
@@ -271,12 +281,158 @@ def sling_action():
     angle = math.atan((float(dy)) / dx)
 
 
+def get_object_bounds(obj):
+    """
+    获取物体的边界框（pygame坐标系）
+    返回: (left, right, top, bottom) - 注意pygame中y向下增大
+    """
+    if isinstance(obj, Pig):
+        # 猪是圆形
+        pos = obj.body.position
+        pygame_pos = to_pygame(pos)
+        radius = obj.shape.radius
+        return (
+            pygame_pos[0] - radius,   # left
+            pygame_pos[0] + radius,   # right
+            pygame_pos[1] - radius,   # top (pygame中y小的在上)
+            pygame_pos[1] + radius    # bottom
+        )
+    elif isinstance(obj, Polygon):
+        # 木材是矩形
+        pos = obj.body.position
+        pygame_pos = to_pygame(pos)
+        # 获取半宽和半高
+        half_w = obj._length / 2
+        half_h = obj._height / 2
+        return (
+            pygame_pos[0] - half_w,   # left
+            pygame_pos[0] + half_w,   # right
+            pygame_pos[1] - half_h,   # top
+            pygame_pos[1] + half_h    # bottom
+        )
+    return None
+
+
+def get_snap_position(mouse_x, mouse_y, obj_width, obj_height):
+    """
+    智能吸附系统 - 计算物体应该放置的位置
+
+    参数:
+        mouse_x: 鼠标X坐标（pygame）
+        mouse_y: 鼠标Y坐标（pygame）
+        obj_width: 物体宽度
+        obj_height: 物体高度
+
+    返回:
+        (snap_x, snap_y, snapped): snap后的pygame坐标，以及是否发生了吸附
+    """
+    # 物体的半高（用于计算放置位置）
+    half_height = obj_height / 2
+
+    # 找到鼠标X坐标下方最高的表面
+    highest_surface_y = GROUND_Y_PYGAME  # 默认是地面（pygame坐标）
+    snapped = False
+    snap_threshold = 80  # 吸附阈值：鼠标距离表面多少像素内才吸附
+
+    # 遍历所有已放置的物体
+    all_objects = list(pigs) + list(columns) + list(beams)
+
+    for obj in all_objects:
+        bounds = get_object_bounds(obj)
+        if bounds is None:
+            continue
+
+        left, right, top, bottom = bounds
+
+        # 检查鼠标X是否在物体宽度范围内（加一点容差）
+        tolerance = obj_width / 2 + 5
+        if mouse_x >= left - tolerance and mouse_x <= right + tolerance:
+            # 这个物体在鼠标下方的X范围内
+            # top是物体顶部的pygame Y坐标（数值越小越靠上）
+            if top < highest_surface_y:
+                # 检查鼠标是否在物体上方
+                if mouse_y < top + snap_threshold:
+                    highest_surface_y = top
+                    snapped = True
+
+    # 计算最终放置位置
+    # 物体中心应该在表面上方 half_height 的位置
+    snap_y = highest_surface_y - half_height
+
+    # 如果鼠标位置明显高于吸附位置（超过阈值），则使用鼠标位置
+    if mouse_y < snap_y - snap_threshold and snapped:
+        # 玩家明显想放在更高的位置，取消吸附
+        snap_y = mouse_y
+        snapped = False
+    elif not snapped:
+        # 没有找到可吸附的物体
+        # 如果鼠标在地面以上，使用鼠标位置；否则吸附到地面
+        if mouse_y < GROUND_Y_PYGAME - half_height:
+            snap_y = mouse_y
+        else:
+            snap_y = GROUND_Y_PYGAME - half_height
+            snapped = True
+
+    return mouse_x, snap_y, snapped
+
+
+def get_object_dimensions(place_type):
+    """获取物体的尺寸"""
+    if place_type == PLACE_PIG:
+        return 28, 28  # 猪的直径
+    elif place_type == PLACE_COLUMN:
+        return 20, 85  # 竖木
+    elif place_type == PLACE_BEAM:
+        return 85, 20  # 横木
+    return 0, 0
+
+
+def check_placement_valid(x, y, width, height):
+    """
+    检查放置位置是否有效（不与其他物体重叠）
+
+    参数:
+        x, y: pygame坐标系中的中心位置
+        width, height: 物体尺寸
+
+    返回:
+        True 如果位置有效，False 如果会重叠
+    """
+    # 计算新物体的边界
+    half_w = width / 2
+    half_h = height / 2
+    new_left = x - half_w
+    new_right = x + half_w
+    new_top = y - half_h
+    new_bottom = y + half_h
+
+    # 检查与所有已放置物体的重叠
+    all_objects = list(pigs) + list(columns) + list(beams)
+
+    for obj in all_objects:
+        bounds = get_object_bounds(obj)
+        if bounds is None:
+            continue
+
+        left, right, top, bottom = bounds
+
+        # 检查矩形重叠（加一点容差防止刚好接触）
+        overlap_tolerance = 3
+        if (new_left < right - overlap_tolerance and
+            new_right > left + overlap_tolerance and
+            new_top < bottom - overlap_tolerance and
+            new_bottom > top + overlap_tolerance):
+            return False
+
+    return True
+
+
 def draw_build_phase_ui():
     """绘制布防阶段UI"""
     # 半透明背景面板
-    panel = pygame.Surface((400, 200))
+    panel = pygame.Surface((400, 220))
     panel.fill((50, 50, 80))
-    panel.set_alpha(200)
+    panel.set_alpha(220)
     screen.blit(panel, (400, 10))
 
     # 标题
@@ -322,6 +478,11 @@ def draw_build_phase_ui():
         hint = small_font.render("Press SPACE to start attack!", True, GREEN)
     screen.blit(hint, (430, y_offset))
 
+    # 右键删除提示
+    y_offset += 25
+    hint2 = small_font.render("Right-click to remove objects", True, ORANGE)
+    screen.blit(hint2, (430, y_offset))
+
     # 绘制放置区域边界线
     pygame.draw.line(screen, YELLOW, (PLACE_ZONE_LEFT, 0), (PLACE_ZONE_LEFT, 540), 2)
 
@@ -330,38 +491,107 @@ def draw_build_phase_ui():
     screen.blit(zone_text, (PLACE_ZONE_LEFT + 10, 300))
 
 
+def draw_attack_timer():
+    """绘制进攻阶段倒计时"""
+    if game_state != GAME_STATE_PLAY:
+        return
+
+    elapsed = time.time() - attack_start_time
+    remaining = max(0, ATTACK_TIME_LIMIT - elapsed)
+
+    minutes = int(remaining // 60)
+    seconds = int(remaining % 60)
+
+    # 根据剩余时间选择颜色
+    if remaining > 60:
+        color = WHITE
+    elif remaining > 30:
+        color = YELLOW
+    else:
+        color = RED
+
+    timer_text = f"Time: {minutes}:{seconds:02d}"
+    text = bold_font.render(timer_text, True, color)
+    screen.blit(text, (1050, 200))
+
+
 def draw_ghost_preview():
-    """绘制鼠标位置的预览图"""
+    """绘制鼠标位置的预览图（带吸附效果）"""
     if x_mouse < PLACE_ZONE_LEFT or y_mouse > 540:
         return
 
+    # 获取当前物体尺寸
+    obj_width, obj_height = get_object_dimensions(current_place_type)
+    if obj_width == 0:
+        return
+
+    # 计算吸附位置
+    snap_x, snap_y, snapped = get_snap_position(x_mouse, y_mouse, obj_width, obj_height)
+
+    # 检查放置是否有效
+    is_valid = check_placement_valid(snap_x, snap_y, obj_width, obj_height)
+
     # 根据当前选择绘制预览
     if current_place_type == PLACE_PIG and level.can_place('pigs'):
-        screen.blit(pig_preview, (x_mouse - 15, y_mouse - 15))
+        # 绘制吸附指示线（如果发生吸附）
+        if snapped:
+            pygame.draw.line(screen, GREEN, (snap_x - 20, snap_y + 14),
+                           (snap_x + 20, snap_y + 14), 2)
+
+        # 设置预览颜色（有效=半透明，无效=红色）
+        preview = pig_preview.copy()
+        if not is_valid:
+            preview.fill((255, 100, 100), special_flags=pygame.BLEND_MULT)
+        screen.blit(preview, (snap_x - 15, snap_y - 15))
+
     elif current_place_type == PLACE_COLUMN and level.can_place('columns'):
-        screen.blit(column_preview_ghost, (x_mouse - 11, y_mouse - 42))
+        if snapped:
+            pygame.draw.line(screen, GREEN, (snap_x - 15, snap_y + 42),
+                           (snap_x + 15, snap_y + 42), 2)
+
+        preview = column_preview_ghost.copy()
+        if not is_valid:
+            preview.fill((255, 100, 100), special_flags=pygame.BLEND_MULT)
+        screen.blit(preview, (snap_x - 11, snap_y - 42))
+
     elif current_place_type == PLACE_BEAM and level.can_place('beams'):
-        screen.blit(beam_preview_ghost, (x_mouse - 43, y_mouse - 11))
+        if snapped:
+            pygame.draw.line(screen, GREEN, (snap_x - 50, snap_y + 10),
+                           (snap_x + 50, snap_y + 10), 2)
+
+        preview = beam_preview_ghost.copy()
+        if not is_valid:
+            preview.fill((255, 100, 100), special_flags=pygame.BLEND_MULT)
+        screen.blit(preview, (snap_x - 43, snap_y - 11))
 
 
 def place_object(x, y):
-    """在指定位置放置物体"""
+    """在指定位置放置物体（使用智能吸附）"""
     global current_place_type
 
     # 检查是否在有效放置区域
     if x < PLACE_ZONE_LEFT or y > 540:
         return False
 
-    # 转换为pymunk坐标
-    pymunk_y = -y + 600
+    # 获取物体尺寸
+    obj_width, obj_height = get_object_dimensions(current_place_type)
+    if obj_width == 0:
+        return False
 
-    # 确保不会放置在地面以下
-    if pymunk_y < PLACE_ZONE_BOTTOM + 20:
-        pymunk_y = PLACE_ZONE_BOTTOM + 20
+    # 计算吸附位置
+    snap_x, snap_y, snapped = get_snap_position(x, y, obj_width, obj_height)
+
+    # 检查放置是否有效
+    if not check_placement_valid(snap_x, snap_y, obj_width, obj_height):
+        return False
+
+    # 转换为pymunk坐标
+    pymunk_x = snap_x
+    pymunk_y = -snap_y + 600
 
     if current_place_type == PLACE_PIG and level.can_place('pigs'):
         # 放置猪 - 使用静态body防止掉落
-        pig = Pig(x, pymunk_y, space, static=True)
+        pig = Pig(pymunk_x, pymunk_y, space, static=True)
         pigs.append(pig)
         placed_static_bodies.append(pig)
         level.consume_item('pigs')
@@ -369,7 +599,7 @@ def place_object(x, y):
 
     elif current_place_type == PLACE_COLUMN and level.can_place('columns'):
         # 放置竖木
-        p = (x, pymunk_y)
+        p = (pymunk_x, pymunk_y)
         column = Polygon(p, 20, 85, space, static=True)
         columns.append(column)
         placed_static_bodies.append(column)
@@ -378,7 +608,7 @@ def place_object(x, y):
 
     elif current_place_type == PLACE_BEAM and level.can_place('beams'):
         # 放置横木
-        p = (x, pymunk_y)
+        p = (pymunk_x, pymunk_y)
         beam = Polygon(p, 85, 20, space, static=True)
         beams.append(beam)
         placed_static_bodies.append(beam)
@@ -388,12 +618,96 @@ def place_object(x, y):
     return False
 
 
+def remove_object_at(x, y):
+    """
+    移除指定位置的物体（右键删除功能）
+
+    参数:
+        x, y: pygame坐标
+
+    返回:
+        True 如果成功移除，False 如果没有找到物体
+    """
+    # 只在布防阶段有效
+    if game_state != GAME_STATE_BUILD:
+        return False
+
+    # 检查是否在放置区域内
+    if x < PLACE_ZONE_LEFT:
+        return False
+
+    # 遍历所有物体，找到被点击的那个
+    # 优先检查猪（因为它们更重要）
+    for pig in pigs[:]:  # 使用切片复制列表以便安全删除
+        bounds = get_object_bounds(pig)
+        if bounds:
+            left, right, top, bottom = bounds
+            if left <= x <= right and top <= y <= bottom:
+                # 找到了！移除它
+                space.remove(pig.shape, pig.body)
+                pigs.remove(pig)
+                if pig in placed_static_bodies:
+                    placed_static_bodies.remove(pig)
+                # 返还库存
+                level.inventory['pigs'] += 1
+                return True
+
+    # 检查竖木
+    for column in columns[:]:
+        bounds = get_object_bounds(column)
+        if bounds:
+            left, right, top, bottom = bounds
+            if left <= x <= right and top <= y <= bottom:
+                space.remove(column.shape, column.body)
+                columns.remove(column)
+                if column in placed_static_bodies:
+                    placed_static_bodies.remove(column)
+                level.inventory['columns'] += 1
+                return True
+
+    # 检查横木
+    for beam in beams[:]:
+        bounds = get_object_bounds(beam)
+        if bounds:
+            left, right, top, bottom = bounds
+            if left <= x <= right and top <= y <= bottom:
+                space.remove(beam.shape, beam.body)
+                beams.remove(beam)
+                if beam in placed_static_bodies:
+                    placed_static_bodies.remove(beam)
+                level.inventory['beams'] += 1
+                return True
+
+    return False
+
+
 def activate_physics():
     """激活所有静态物体的物理模拟"""
+    global physics_activation_time, attack_start_time
+
+    # 记录激活时间
+    physics_activation_time = time.time()
+    attack_start_time = time.time()
+
+    # 先进行几次小步长的物理模拟，让物体自然沉降
+    # 这可以减少激活时的突然碰撞
     for obj in placed_static_bodies:
         if hasattr(obj, 'activate'):
             obj.activate(space)
+
+    # 执行几次小步长的物理更新让物体稳定
+    dt = 1.0 / 200.0
+    for _ in range(20):
+        space.step(dt)
+
     placed_static_bodies.clear()
+
+
+def is_in_stabilization_period():
+    """检查是否在物理稳定期内"""
+    if physics_activation_time == 0:
+        return False
+    return (time.time() - physics_activation_time) < PHYSICS_STABILIZE_DURATION
 
 
 def draw_level_cleared():
@@ -434,19 +748,32 @@ def draw_level_failed():
 
     failed = bold_font3.render("DEFENDER WINS!", True, WHITE)
 
-    if level.number_of_birds <= 0 and time.time() - t2 > 5 and len(pigs) > 0:
+    # 检查是否超时
+    time_up = False
+    if attack_start_time > 0:
+        elapsed = time.time() - attack_start_time
+        time_up = elapsed >= ATTACK_TIME_LIMIT
+
+    if (level.number_of_birds <= 0 and time.time() - t2 > 5 and len(pigs) > 0) or \
+       (time_up and len(pigs) > 0):
         game_state = GAME_STATE_FAILED
 
         rect = pygame.Rect(300, 0, 600, 800)
         pygame.draw.rect(screen, BLACK, rect)
         screen.blit(failed, (400, 90))
-        screen.blit(pig_happy, (380, 120))
+
+        # 如果是超时，显示超时信息
+        if time_up:
+            timeout_text = bold_font2.render("TIME'S UP!", True, RED)
+            screen.blit(timeout_text, (480, 140))
+
+        screen.blit(pig_happy, (380, 180))
         screen.blit(replay_button, (520, 460))
 
 
 def restart():
     """重置关卡"""
-    global placed_static_bodies
+    global placed_static_bodies, physics_activation_time, attack_start_time
 
     pigs_to_remove = []
     birds_to_remove = []
@@ -478,6 +805,8 @@ def restart():
         beams.remove(beam)
 
     placed_static_bodies.clear()
+    physics_activation_time = 0
+    attack_start_time = 0
 
 
 def post_solve_bird_pig(arbiter, space, _):
@@ -527,7 +856,11 @@ def post_solve_bird_wood(arbiter, space, _):
 
 
 def post_solve_pig_wood(arbiter, space, _):
-    """猪与木材的碰撞处理"""
+    """猪与木材的碰撞处理 - 增加稳定期保护"""
+    # 在稳定期内不造成伤害
+    if is_in_stabilization_period():
+        return
+
     pigs_to_remove = []
     if arbiter.total_impulse.length > 700:
         pig_shape, wood_shape = arbiter.shapes
@@ -601,7 +934,7 @@ while running:
                 space.gravity = (0.0, -700.0)
                 level.bool_space = False
 
-        # 鼠标点击处理
+        # 鼠标左键点击处理
         elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             if game_state == GAME_STATE_BUILD:
                 # 布防阶段 - 放置物体
@@ -612,6 +945,11 @@ while running:
                 if (x_mouse > 100 and x_mouse < 250 and
                         y_mouse > 370 and y_mouse < 550):
                     mouse_pressed = True
+
+        # 鼠标右键点击处理 - 删除物体
+        elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 3:
+            if game_state == GAME_STATE_BUILD:
+                remove_object_at(x_mouse, y_mouse)
 
         elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
             if game_state == GAME_STATE_PLAY:
@@ -694,10 +1032,8 @@ while running:
 
     # 根据游戏状态绘制
     if game_state == GAME_STATE_BUILD:
-        # 布防阶段
-        draw_build_phase_ui()
+        # 布防阶段 - 预览图先绘制
         draw_ghost_preview()
-
         # 绘制弹弓上的小鸟（预览）
         screen.blit(redbird, (130, 426))
 
@@ -803,11 +1139,23 @@ while running:
     # 绘制暂停按钮（仅在游戏阶段）
     if game_state == GAME_STATE_PLAY:
         screen.blit(pause_button, (10, 90))
+        # 绘制进攻阶段倒计时
+        draw_attack_timer()
+
+        # 显示稳定期提示
+        if is_in_stabilization_period():
+            stabilize_text = small_font.render("Stabilizing...", True, YELLOW)
+            screen.blit(stabilize_text, (550, 300))
 
     # 暂停画面
     if game_state == GAME_STATE_PAUSE:
         screen.blit(play_button, (500, 200))
         screen.blit(replay_button, (500, 300))
+
+    # ===== 关键修复：UI在所有游戏物体之后绘制 =====
+    # 这确保UI永远在最顶层，不会被物体遮挡
+    if game_state == GAME_STATE_BUILD:
+        draw_build_phase_ui()
 
     # 胜负判定
     if game_state == GAME_STATE_PLAY:

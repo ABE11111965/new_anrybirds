@@ -3,6 +3,12 @@
 游戏流程：
 1. 布防阶段 (Defense Phase) - 防守方放置猪和建筑
 2. 进攻阶段 (Attack Phase) - 进攻方发射小鸟
+
+修复版本：
+- 完善的胜负判定逻辑
+- 边界检测（飞出屏幕的物体自动移除）
+- 60帧预热稳定期
+- 场景静止检测
 """
 
 import os
@@ -159,13 +165,26 @@ PLACE_ZONE_LEFT = 600  # 只能在此x坐标右侧放置
 PLACE_ZONE_BOTTOM = 60  # 地面高度（pymunk坐标系）
 GROUND_Y_PYGAME = 540  # 地面Y坐标（pygame坐标系，540 = 600-60）
 
-# 物理稳定期变量 - 防止开局自爆
+# ========== 物理稳定期变量 - 防止开局自爆 ==========
 physics_activation_time = 0  # 物理激活时间戳
-PHYSICS_STABILIZE_DURATION = 2.0  # 稳定期持续秒数
+PHYSICS_STABILIZE_DURATION = 2.5  # 稳定期持续秒数（增加到2.5秒）
+WARMUP_FRAMES = 60  # 预热帧数：激活物理后先运行60帧让物体稳定
+damage_enabled = False  # 伤害开关：预热期间禁用伤害
+
+# ========== 边界检测常量 ==========
+BOUNDARY_LEFT = -100      # 左边界（pymunk坐标）
+BOUNDARY_RIGHT = 1400     # 右边界（pymunk坐标）
+BOUNDARY_BOTTOM = -100    # 下边界（pymunk坐标，物体掉落到这里就移除）
+BOUNDARY_TOP = 800        # 上边界（pymunk坐标）
 
 # 进攻阶段计时器
 ATTACK_TIME_LIMIT = 180  # 进攻阶段时间限制（秒）
 attack_start_time = 0
+
+# ========== 场景静止检测 ==========
+STILLNESS_THRESHOLD = 5.0  # 速度阈值：低于此值视为静止
+STILLNESS_DURATION = 1.5   # 需要保持静止的秒数
+scene_still_start_time = 0  # 场景开始静止的时间
 
 # 字体
 bold_font = pygame.font.SysFont("arial", 30, bold=True)
@@ -317,6 +336,11 @@ def get_snap_position(mouse_x, mouse_y, obj_width, obj_height):
     """
     智能吸附系统 - 计算物体应该放置的位置
 
+    【坐标系说明】
+    - Pygame: 原点在左上角，Y轴向下
+    - Pymunk: 原点在左下角，Y轴向上
+    - 转换公式: pygame_y = 600 - pymunk_y
+
     参数:
         mouse_x: 鼠标X坐标（pygame）
         mouse_y: 鼠标Y坐标（pygame）
@@ -324,7 +348,7 @@ def get_snap_position(mouse_x, mouse_y, obj_width, obj_height):
         obj_height: 物体高度
 
     返回:
-        (snap_x, snap_y, snapped): snap后的pygame坐标，以及是否发生了吸附
+        (snap_x, snap_y, snapped): snap后的pygame坐标（中心点），以及是否发生了吸附
     """
     # 物体的半高（用于计算放置位置）
     half_height = obj_height / 2
@@ -377,7 +401,7 @@ def get_snap_position(mouse_x, mouse_y, obj_width, obj_height):
 
 
 def get_object_dimensions(place_type):
-    """获取物体的尺寸"""
+    """获取物体的尺寸（宽度, 高度）"""
     if place_type == PLACE_PIG:
         return 28, 28  # 猪的直径
     elif place_type == PLACE_COLUMN:
@@ -525,13 +549,14 @@ def draw_ghost_preview():
     if obj_width == 0:
         return
 
-    # 计算吸附位置
+    # 计算吸附位置（这里得到的是物体中心点的pygame坐标）
     snap_x, snap_y, snapped = get_snap_position(x_mouse, y_mouse, obj_width, obj_height)
 
     # 检查放置是否有效
     is_valid = check_placement_valid(snap_x, snap_y, obj_width, obj_height)
 
     # 根据当前选择绘制预览
+    # 【关键】预览图绘制位置 = 中心点 - 图片半尺寸
     if current_place_type == PLACE_PIG and level.can_place('pigs'):
         # 绘制吸附指示线（如果发生吸附）
         if snapped:
@@ -542,6 +567,7 @@ def draw_ghost_preview():
         preview = pig_preview.copy()
         if not is_valid:
             preview.fill((255, 100, 100), special_flags=pygame.BLEND_MULT)
+        # 猪的图片是30x30，中心对齐
         screen.blit(preview, (snap_x - 15, snap_y - 15))
 
     elif current_place_type == PLACE_COLUMN and level.can_place('columns'):
@@ -552,6 +578,7 @@ def draw_ghost_preview():
         preview = column_preview_ghost.copy()
         if not is_valid:
             preview.fill((255, 100, 100), special_flags=pygame.BLEND_MULT)
+        # 竖木图片是22x84，中心对齐
         screen.blit(preview, (snap_x - 11, snap_y - 42))
 
     elif current_place_type == PLACE_BEAM and level.can_place('beams'):
@@ -562,11 +589,20 @@ def draw_ghost_preview():
         preview = beam_preview_ghost.copy()
         if not is_valid:
             preview.fill((255, 100, 100), special_flags=pygame.BLEND_MULT)
+        # 横木图片是86x22，中心对齐
         screen.blit(preview, (snap_x - 43, snap_y - 11))
 
 
 def place_object(x, y):
-    """在指定位置放置物体（使用智能吸附）"""
+    """
+    在指定位置放置物体（使用智能吸附）
+
+    【坐标转换说明】
+    1. 输入: pygame屏幕坐标 (x, y)
+    2. 通过 get_snap_position 计算吸附后的pygame坐标 (snap_x, snap_y)
+    3. 转换为pymunk坐标: pymunk_y = 600 - snap_y
+    4. 创建物体时使用pymunk坐标（物体中心点）
+    """
     global current_place_type
 
     # 检查是否在有效放置区域
@@ -578,16 +614,16 @@ def place_object(x, y):
     if obj_width == 0:
         return False
 
-    # 计算吸附位置
+    # 计算吸附位置（pygame坐标，物体中心点）
     snap_x, snap_y, snapped = get_snap_position(x, y, obj_width, obj_height)
 
     # 检查放置是否有效
     if not check_placement_valid(snap_x, snap_y, obj_width, obj_height):
         return False
 
-    # 转换为pymunk坐标
+    # 转换为pymunk坐标（物体中心点）
     pymunk_x = snap_x
-    pymunk_y = -snap_y + 600
+    pymunk_y = 600 - snap_y  # pygame转pymunk
 
     if current_place_type == PLACE_PIG and level.can_place('pigs'):
         # 放置猪 - 使用静态body防止掉落
@@ -682,32 +718,181 @@ def remove_object_at(x, y):
 
 
 def activate_physics():
-    """激活所有静态物体的物理模拟"""
-    global physics_activation_time, attack_start_time
+    """
+    激活所有静态物体的物理模拟
+
+    【预热机制说明】
+    为了防止"开局自爆"，我们在激活物理后执行以下步骤：
+    1. 将所有静态物体转换为动态物体
+    2. 执行60帧的"隐形预热"物理模拟（不渲染，不判定伤害）
+    3. 让物体在这60帧内自然沉降稳定
+    4. 预热完成后才开始正式的游戏渲染和伤害判定
+    """
+    global physics_activation_time, attack_start_time, damage_enabled
 
     # 记录激活时间
     physics_activation_time = time.time()
     attack_start_time = time.time()
 
-    # 先进行几次小步长的物理模拟，让物体自然沉降
-    # 这可以减少激活时的突然碰撞
+    # 【关键】预热期间禁用伤害
+    damage_enabled = False
+
+    # 激活所有静态物体
     for obj in placed_static_bodies:
         if hasattr(obj, 'activate'):
             obj.activate(space)
 
-    # 执行几次小步长的物理更新让物体稳定
-    dt = 1.0 / 200.0
-    for _ in range(20):
+    # ========== 60帧预热模拟 ==========
+    # 在这里执行60帧的物理更新，但不渲染画面
+    # 这让物体有时间自然沉降，避免突然激活时的剧烈碰撞
+    print("[预热] 开始60帧隐形物理模拟...")
+    dt = 1.0 / 60.0  # 每帧时间步长
+    for frame in range(WARMUP_FRAMES):
         space.step(dt)
+    print("[预热] 预热完成，物体已稳定")
 
     placed_static_bodies.clear()
 
+    # 预热完成后，延迟启用伤害（在主循环中通过时间判断）
+
 
 def is_in_stabilization_period():
-    """检查是否在物理稳定期内"""
+    """
+    检查是否在物理稳定期内
+    稳定期内猪不会受到伤害，防止因微小穿模导致的"自爆"
+    """
     if physics_activation_time == 0:
-        return False
+        return True  # 未激活时也返回True防止误伤
     return (time.time() - physics_activation_time) < PHYSICS_STABILIZE_DURATION
+
+
+def remove_out_of_bounds_objects():
+    """
+    【边界检测】移除飞出屏幕边界的物体
+
+    这是修复"游戏无法结算"问题的关键函数。
+    当物体（尤其是猪）被弹飞到屏幕外时，如果不移除它们，
+    pigs列表永远不为空，导致胜利判定失败。
+
+    边界定义（pymunk坐标系）：
+    - X < -100 或 X > 1400: 飞出左右边界
+    - Y < -100: 掉落到地面以下
+    """
+    global score
+
+    # 检查猪是否飞出边界
+    pigs_to_remove = []
+    for pig in pigs:
+        pos = pig.body.position
+        # 【关键判定】检查pymunk坐标是否超出边界
+        if (pos.x < BOUNDARY_LEFT or pos.x > BOUNDARY_RIGHT or
+            pos.y < BOUNDARY_BOTTOM):
+            pigs_to_remove.append(pig)
+            score += 5000  # 坠崖死亡也加分
+            print(f"[边界检测] 猪飞出边界被移除: ({pos.x:.0f}, {pos.y:.0f})")
+
+    for pig in pigs_to_remove:
+        try:
+            space.remove(pig.shape, pig.body)
+        except:
+            pass
+        if pig in pigs:
+            pigs.remove(pig)
+
+    # 检查小鸟是否飞出边界
+    birds_to_remove = []
+    for bird in birds:
+        pos = bird.body.position
+        if (pos.x < BOUNDARY_LEFT or pos.x > BOUNDARY_RIGHT or
+            pos.y < BOUNDARY_BOTTOM):
+            birds_to_remove.append(bird)
+
+    for bird in birds_to_remove:
+        try:
+            space.remove(bird.shape, bird.body)
+        except:
+            pass
+        if bird in birds:
+            birds.remove(bird)
+
+
+def is_scene_still():
+    """
+    【场景静止检测】检查场景中所有动态物体是否都已静止
+
+    用于优化失败判定：如果所有物体都静止了，不需要傻等5秒
+    返回: True 如果所有物体速度都低于阈值
+    """
+    # 检查所有猪的速度
+    for pig in pigs:
+        if pig.body.velocity.length > STILLNESS_THRESHOLD:
+            return False
+
+    # 检查所有小鸟的速度
+    for bird in birds:
+        if bird.body.velocity.length > STILLNESS_THRESHOLD:
+            return False
+
+    # 检查所有木材的速度
+    for column in columns:
+        if column.body.velocity.length > STILLNESS_THRESHOLD:
+            return False
+
+    for beam in beams:
+        if beam.body.velocity.length > STILLNESS_THRESHOLD:
+            return False
+
+    return True
+
+
+def check_win_condition():
+    """
+    【核心胜负判定函数】
+
+    这个函数每帧调用，检查游戏是否应该结束。
+
+    进攻方胜利条件：
+    - 所有猪都被消灭（pigs列表为空）
+
+    防守方胜利条件（满足任一）：
+    1. 进攻方用完所有小鸟，且场景静止，且猪还活着
+    2. 超时（3分钟时间到）且猪还活着
+
+    返回:
+    - 'attacker_wins': 进攻方胜利
+    - 'defender_wins': 防守方胜利
+    - None: 游戏继续
+    """
+    global scene_still_start_time
+
+    # 【胜利判定】进攻方胜利：所有猪都死了
+    if len(pigs) == 0:
+        print("[胜负判定] 所有猪已被消灭，进攻方胜利！")
+        return 'attacker_wins'
+
+    # 【失败判定1】超时判定
+    if attack_start_time > 0:
+        elapsed = time.time() - attack_start_time
+        if elapsed >= ATTACK_TIME_LIMIT:
+            print("[胜负判定] 时间耗尽，防守方胜利！")
+            return 'defender_wins_timeout'
+
+    # 【失败判定2】小鸟用完 + 场景静止
+    if level.number_of_birds <= 0 and len(birds) == 0:
+        # 检查场景是否静止
+        if is_scene_still():
+            # 记录静止开始时间
+            if scene_still_start_time == 0:
+                scene_still_start_time = time.time()
+            # 静止超过指定时间，判定失败
+            elif time.time() - scene_still_start_time > STILLNESS_DURATION:
+                print("[胜负判定] 小鸟用完且场景静止，防守方胜利！")
+                return 'defender_wins'
+        else:
+            # 场景还在动，重置静止计时
+            scene_still_start_time = 0
+
+    return None
 
 
 def draw_level_cleared():
@@ -717,63 +902,54 @@ def draw_level_cleared():
     level_cleared = bold_font3.render("ATTACKER WINS!", True, WHITE)
     score_level_cleared = bold_font2.render(str(score), True, WHITE)
 
-    if level.number_of_birds >= 0 and len(pigs) == 0:
-        if bonus_score_once:
-            score += (level.number_of_birds - 1) * 10000
-        bonus_score_once = False
-        game_state = GAME_STATE_CLEARED
+    if bonus_score_once:
+        score += (level.number_of_birds) * 10000
+    bonus_score_once = False
+    game_state = GAME_STATE_CLEARED
 
-        rect = pygame.Rect(300, 0, 600, 800)
-        pygame.draw.rect(screen, BLACK, rect)
-        screen.blit(level_cleared, (400, 90))
+    rect = pygame.Rect(300, 0, 600, 800)
+    pygame.draw.rect(screen, BLACK, rect)
+    screen.blit(level_cleared, (400, 90))
 
-        if score >= level.one_star and score <= level.two_star:
-            screen.blit(star1, (310, 190))
-        if score >= level.two_star and score <= level.three_star:
-            screen.blit(star1, (310, 190))
-            screen.blit(star2, (500, 170))
-        if score >= level.three_star:
-            screen.blit(star1, (310, 190))
-            screen.blit(star2, (500, 170))
-            screen.blit(star3, (700, 200))
+    if score >= level.one_star and score <= level.two_star:
+        screen.blit(star1, (310, 190))
+    if score >= level.two_star and score <= level.three_star:
+        screen.blit(star1, (310, 190))
+        screen.blit(star2, (500, 170))
+    if score >= level.three_star:
+        screen.blit(star1, (310, 190))
+        screen.blit(star2, (500, 170))
+        screen.blit(star3, (700, 200))
 
-        screen.blit(score_level_cleared, (550, 400))
-        screen.blit(replay_button, (510, 480))
-        screen.blit(next_button, (620, 480))
+    screen.blit(score_level_cleared, (550, 400))
+    screen.blit(replay_button, (510, 480))
+    screen.blit(next_button, (620, 480))
 
 
-def draw_level_failed():
+def draw_level_failed(timeout=False):
     """绘制防守胜利画面"""
     global game_state
 
     failed = bold_font3.render("DEFENDER WINS!", True, WHITE)
+    game_state = GAME_STATE_FAILED
 
-    # 检查是否超时
-    time_up = False
-    if attack_start_time > 0:
-        elapsed = time.time() - attack_start_time
-        time_up = elapsed >= ATTACK_TIME_LIMIT
+    rect = pygame.Rect(300, 0, 600, 800)
+    pygame.draw.rect(screen, BLACK, rect)
+    screen.blit(failed, (400, 90))
 
-    if (level.number_of_birds <= 0 and time.time() - t2 > 5 and len(pigs) > 0) or \
-       (time_up and len(pigs) > 0):
-        game_state = GAME_STATE_FAILED
+    # 如果是超时，显示超时信息
+    if timeout:
+        timeout_text = bold_font2.render("TIME'S UP!", True, RED)
+        screen.blit(timeout_text, (480, 140))
 
-        rect = pygame.Rect(300, 0, 600, 800)
-        pygame.draw.rect(screen, BLACK, rect)
-        screen.blit(failed, (400, 90))
-
-        # 如果是超时，显示超时信息
-        if time_up:
-            timeout_text = bold_font2.render("TIME'S UP!", True, RED)
-            screen.blit(timeout_text, (480, 140))
-
-        screen.blit(pig_happy, (380, 180))
-        screen.blit(replay_button, (520, 460))
+    screen.blit(pig_happy, (380, 180))
+    screen.blit(replay_button, (520, 460))
 
 
 def restart():
     """重置关卡"""
     global placed_static_bodies, physics_activation_time, attack_start_time
+    global damage_enabled, scene_still_start_time, bonus_score_once
 
     pigs_to_remove = []
     birds_to_remove = []
@@ -783,34 +959,57 @@ def restart():
     for pig in pigs:
         pigs_to_remove.append(pig)
     for pig in pigs_to_remove:
-        space.remove(pig.shape, pig.shape.body)
-        pigs.remove(pig)
+        try:
+            space.remove(pig.shape, pig.body)
+        except:
+            pass
+        if pig in pigs:
+            pigs.remove(pig)
 
     for bird in birds:
         birds_to_remove.append(bird)
     for bird in birds_to_remove:
-        space.remove(bird.shape, bird.shape.body)
-        birds.remove(bird)
+        try:
+            space.remove(bird.shape, bird.body)
+        except:
+            pass
+        if bird in birds:
+            birds.remove(bird)
 
     for column in columns:
         columns_to_remove.append(column)
     for column in columns_to_remove:
-        space.remove(column.shape, column.shape.body)
-        columns.remove(column)
+        try:
+            space.remove(column.shape, column.body)
+        except:
+            pass
+        if column in columns:
+            columns.remove(column)
 
     for beam in beams:
         beams_to_remove.append(beam)
     for beam in beams_to_remove:
-        space.remove(beam.shape, beam.shape.body)
-        beams.remove(beam)
+        try:
+            space.remove(beam.shape, beam.body)
+        except:
+            pass
+        if beam in beams:
+            beams.remove(beam)
 
     placed_static_bodies.clear()
     physics_activation_time = 0
     attack_start_time = 0
+    damage_enabled = False
+    scene_still_start_time = 0
+    bonus_score_once = True
 
 
 def post_solve_bird_pig(arbiter, space, _):
     """鸟与猪的碰撞处理"""
+    # 在稳定期内不造成伤害
+    if is_in_stabilization_period():
+        return
+
     surface = screen
     a, b = arbiter.shapes
     bird_body = a.body
@@ -830,8 +1029,12 @@ def post_solve_bird_pig(arbiter, space, _):
             score += 10000
 
     for pig in pigs_to_remove:
-        space.remove(pig.shape, pig.shape.body)
-        pigs.remove(pig)
+        try:
+            space.remove(pig.shape, pig.body)
+        except:
+            pass
+        if pig in pigs:
+            pigs.remove(pig)
 
 
 def post_solve_bird_wood(arbiter, space, _):
@@ -850,14 +1053,22 @@ def post_solve_bird_wood(arbiter, space, _):
                 columns.remove(poly)
             if poly in beams:
                 beams.remove(poly)
-        space.remove(b, b.body)
+        try:
+            space.remove(b, b.body)
+        except:
+            pass
         global score
         score += 5000
 
 
 def post_solve_pig_wood(arbiter, space, _):
-    """猪与木材的碰撞处理 - 增加稳定期保护"""
-    # 在稳定期内不造成伤害
+    """
+    猪与木材的碰撞处理
+
+    【稳定期保护】在物理激活后的前2.5秒内，禁用此伤害判定
+    这可以防止因物体紧贴而产生的"开局自爆"问题
+    """
+    # 【关键】在稳定期内不造成伤害
     if is_in_stabilization_period():
         return
 
@@ -873,8 +1084,12 @@ def post_solve_pig_wood(arbiter, space, _):
                     pigs_to_remove.append(pig)
 
     for pig in pigs_to_remove:
-        space.remove(pig.shape, pig.shape.body)
-        pigs.remove(pig)
+        try:
+            space.remove(pig.shape, pig.body)
+        except:
+            pass
+        if pig in pigs:
+            pigs.remove(pig)
 
 
 # 设置碰撞处理器
@@ -889,7 +1104,7 @@ level.number = 0
 level.load_level()
 
 
-# 主游戏循环
+# ==================== 主游戏循环 ====================
 while running:
     # 输入处理
     for event in pygame.event.get():
@@ -1048,14 +1263,20 @@ while running:
                 pygame.draw.line(screen, (0, 0, 0), (sling_x, sling_y - 8),
                                  (sling2_x, sling2_y - 7), 5)
 
-    # 处理小鸟
+    # ========== 物理更新区域（仅在进攻阶段）==========
+    if game_state == GAME_STATE_PLAY:
+        dt = 1.0 / 50.0 / 2.
+        for _ in range(2):
+            space.step(dt)
+
+        # 【关键】边界检测：移除飞出屏幕的物体
+        remove_out_of_bounds_objects()
+
+    # 处理小鸟绘制
     birds_to_remove = []
-    pigs_to_remove = []
     counter += 1
 
     for bird in birds:
-        if bird.shape.body.position.y < 0:
-            birds_to_remove.append(bird)
         p = to_pygame(bird.shape.body.position)
         x, y = p
         x -= 22
@@ -1070,15 +1291,6 @@ while running:
         counter = 0
         restart_counter = False
 
-    # 移除小鸟和猪
-    for bird in birds_to_remove:
-        space.remove(bird.shape, bird.shape.body)
-        birds.remove(bird)
-
-    for pig in pigs_to_remove:
-        space.remove(pig.shape, pig.shape.body)
-        pigs.remove(pig)
-
     # 绘制地面
     for line in static_lines:
         body = line.body
@@ -1089,13 +1301,8 @@ while running:
         pygame.draw.lines(screen, (150, 150, 150), False, [p1, p2])
 
     # 绘制猪
-    i = 0
     for pig in pigs:
-        i += 1
         pig_shape = pig.shape
-        if pig_shape.body.position.y < 0:
-            pigs_to_remove.append(pig)
-
         p = to_pygame(pig_shape.body.position)
         x, y = p
 
@@ -1112,12 +1319,6 @@ while running:
         column.draw_poly('columns', screen)
     for beam in beams:
         beam.draw_poly('beams', screen)
-
-    # 更新物理（仅在非布防阶段）
-    if game_state != GAME_STATE_BUILD:
-        dt = 1.0 / 50.0 / 2.
-        for x in range(2):
-            space.step(dt)
 
     # 绘制弹弓后部
     rect = pygame.Rect(0, 0, 60, 200)
@@ -1147,20 +1348,28 @@ while running:
             stabilize_text = small_font.render("Stabilizing...", True, YELLOW)
             screen.blit(stabilize_text, (550, 300))
 
+        # 显示剩余猪数和鸟数（调试信息）
+        debug_text = small_font.render(f"Pigs: {len(pigs)} | Birds: {level.number_of_birds} | Flying: {len(birds)}", True, WHITE)
+        screen.blit(debug_text, (10, 10))
+
     # 暂停画面
     if game_state == GAME_STATE_PAUSE:
         screen.blit(play_button, (500, 200))
         screen.blit(replay_button, (500, 300))
 
     # ===== 关键修复：UI在所有游戏物体之后绘制 =====
-    # 这确保UI永远在最顶层，不会被物体遮挡
     if game_state == GAME_STATE_BUILD:
         draw_build_phase_ui()
 
-    # 胜负判定
+    # ========== 【核心】胜负判定 ==========
     if game_state == GAME_STATE_PLAY:
-        draw_level_cleared()
-        draw_level_failed()
+        result = check_win_condition()
+        if result == 'attacker_wins':
+            draw_level_cleared()
+        elif result == 'defender_wins':
+            draw_level_failed(timeout=False)
+        elif result == 'defender_wins_timeout':
+            draw_level_failed(timeout=True)
 
     pygame.display.flip()
     clock.tick(50)

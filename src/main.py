@@ -43,8 +43,8 @@ pygame.display.set_caption("Angry Birds - PvP Mode")
 # 加载图片资源
 # 注意：路径可能需要根据实际运行目录调整，这里保留原有的相对路径
 try:
-    redbird = pygame.image.load("../resources/images/red-bird3.png").convert_alpha()
-    background2 = pygame.image.load("../resources/images/background3.png").convert_alpha()
+    redbird = pygame.image.load("../resources/images/angry_birds.png").convert_alpha()
+    background5 = pygame.image.load("../resources/images/background5.png").convert_alpha()
     sling_image = pygame.image.load("../resources/images/sling-3.png").convert_alpha()
     full_sprite = pygame.image.load("../resources/images/full-sprite.png").convert_alpha()
     buttons = pygame.image.load("../resources/images/selected-buttons.png").convert_alpha()
@@ -56,7 +56,7 @@ except Exception as e:
     print(f"资源加载错误: {e}")
     # 提供备用纯色Surface防止崩溃
     redbird = pygame.Surface((30,30)); redbird.fill((255,0,0))
-    background2 = pygame.Surface((1200,650)); background2.fill((255,255,255))
+    background5 = pygame.Surface((1200,650)); background5.fill((255,255,255))
     sling_image = pygame.Surface((50,100)); sling_image.fill((100,50,0))
     full_sprite = pygame.Surface((100,100))
     buttons = pygame.Surface((100,100))
@@ -65,9 +65,10 @@ except Exception as e:
     wood = pygame.Surface((100,20))
     wood2 = pygame.Surface((20,100))
 
+cropped = redbird.subsurface(pygame.Rect(355, 755, 333, 306)).copy()
+redbird = pygame.transform.scale(cropped, (30, 30))
 # 裁剪猪的图片
-rect = pygame.Rect(181, 1050, 50, 50)
-cropped = full_sprite.subsurface(rect).copy()
+cropped = full_sprite.subsurface(pygame.Rect(41, 12, 124, 142)).copy()
 pig_image = pygame.transform.scale(cropped, (30, 30))
 
 # 裁剪星星图片
@@ -126,6 +127,7 @@ x_mouse = 0
 y_mouse = 0
 count = 0
 mouse_pressed = False
+DEBUG_DRAW = False
 t1 = 0
 t2 = 0
 tick_to_next_circle = 10
@@ -560,8 +562,9 @@ def post_solve_bird_pig(arbiter, space, _):
     if is_in_stabilization_period(): return
     bird_body, pig_body = arbiter.shapes[0].body, arbiter.shapes[1].body
     p, p2 = to_pygame(bird_body.position), to_pygame(pig_body.position)
-    pygame.draw.circle(screen, BLACK, p, 30, 4)
-    pygame.draw.circle(screen, RED, p2, 30, 4)
+    if DEBUG_DRAW:
+        pygame.draw.circle(screen, BLUE, p, int(bird.shape.radius), 2)
+        pygame.draw.circle(screen, RED, p2, 30, 4)
 
     for pig in pigs[:]:
         if pig_body == pig.body:
@@ -678,7 +681,7 @@ while running:
 
     # --- 绘图 ---
     screen.fill((130, 200, 100))
-    screen.blit(background2, (0, -50))
+    screen.blit(background5, (0, -50))
     screen.blit(sling_image, (138, 420), pygame.Rect(50, 0, 70, 220))
     for p in bird_path: pygame.draw.circle(screen, WHITE, p, 5, 0)
 
@@ -707,7 +710,8 @@ while running:
     for bird in birds[:]:
         p = to_pygame(bird.shape.body.position)
         screen.blit(redbird, (p[0]-22, p[1]-20))
-        pygame.draw.circle(screen, BLUE, p, int(bird.shape.radius), 2)
+        if DEBUG_DRAW:
+            pygame.draw.circle(screen, BLUE, p, int(bird.shape.radius), 2)
         if count >= 3 and time.time()*1000 - t1 < 5000:
             bird_path.append(p)
             restart_counter = True
@@ -724,7 +728,8 @@ while running:
         deg = math.degrees(pig.shape.body.angle)
         img = pygame.transform.rotate(pig_image, deg)
         screen.blit(img, (p[0]-img.get_width()/2, p[1]-img.get_height()/2))
-        pygame.draw.circle(screen, BLUE, p, int(pig.shape.radius), 2)
+        if DEBUG_DRAW:
+            pygame.draw.circle(screen, BLUE, p, int(pig.shape.radius), 2)
 
     # 木材
     for c in columns: c.draw_poly('columns', screen)

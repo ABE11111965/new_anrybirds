@@ -44,10 +44,13 @@ pygame.display.set_caption("Angry Birds - PvP Mode")
 
 # 加载图片资源
 try:
+    # 加载基础图集
     angry_birds_sheet = pygame.image.load("../resources/images/angry_birds.png").convert_alpha()
-    background5 = pygame.image.load("../resources/images/background5.png").convert_alpha()
-    sling_image = pygame.image.load("../resources/images/sling-3.png").convert_alpha()
     full_sprite = pygame.image.load("../resources/images/full-sprite.png").convert_alpha()
+
+    # 加载背景和UI
+    background2 = pygame.image.load("../resources/images/background3.png").convert_alpha()
+    sling_image = pygame.image.load("../resources/images/sling-3.png").convert_alpha()
     buttons = pygame.image.load("../resources/images/selected-buttons.png").convert_alpha()
     pig_happy = pygame.image.load("../resources/images/pig_failed.png").convert_alpha()
     stars = pygame.image.load("../resources/images/stars-edited.png").convert_alpha()
@@ -55,75 +58,91 @@ try:
     wood2 = pygame.image.load("../resources/images/wood2.png").convert_alpha()
 except Exception as e:
     print(f"资源加载错误: {e}")
-    # 提供备用纯色Surface防止崩溃
-    angry_birds_sheet = pygame.Surface((1000, 1500)); angry_birds_sheet.fill((255, 0, 0))
-    background5 = pygame.Surface((1200, 650)); background5.fill((255, 255, 255))
-    sling_image = pygame.Surface((50, 100)); sling_image.fill((100, 50, 0))
-    full_sprite = pygame.Surface((1000, 1500))
+    # 简单的兜底防止闪退
+    angry_birds_sheet = pygame.Surface((100, 100))
+    full_sprite = pygame.Surface((100, 100))
+    background2 = pygame.Surface((1200, 650));
+    background2.fill((255, 255, 255))
+    sling_image = pygame.Surface((50, 100))
     buttons = pygame.Surface((100, 100))
     pig_happy = pygame.Surface((100, 100))
     stars = pygame.Surface((100, 100))
     wood = pygame.Surface((100, 20))
     wood2 = pygame.Surface((20, 100))
 
-# === 裁剪小鸟图片 ===
-# 红鸟 (来自 angry_birds.png)
-rect_red = pygame.Rect(355, 755, 333, 306)
-red_bird_img_raw = angry_birds_sheet.subsurface(rect_red).copy()
-red_bird_image = pygame.transform.scale(red_bird_img_raw, (30, 30))
+# === 1. 小鸟素材处理 ===
 
-# 橘鸟 (来自 angry_birds.png) - 极速膨胀技能
+# [红鸟] 直接使用单张图片
+try:
+    red_bird_img_raw = pygame.image.load("../resources/images/red-bird3.png").convert_alpha()
+    red_bird_image = pygame.transform.scale(red_bird_img_raw, (30, 30))
+except:
+    red_bird_image = pygame.Surface((30, 30));
+    red_bird_image.fill((255, 0, 0))
+
+# [橘鸟] 极速膨胀 (使用 angry_birds.png 真实坐标)
 rect_orange = pygame.Rect(355, 755, 333, 306)
-orange_bird_img_raw = angry_birds_sheet.subsurface(rect_orange).copy()
-# 给橘鸟着色
-orange_tint = pygame.Surface(orange_bird_img_raw.get_size()).convert_alpha()
-orange_tint.fill((255, 165, 0, 100))
-orange_bird_img_raw.blit(orange_tint, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
-orange_bird_image = pygame.transform.scale(orange_bird_img_raw, (34, 34))
-orange_bird_image_big = pygame.transform.scale(orange_bird_img_raw, (90, 90))  # 膨胀后尺寸
+try:
+    orange_bird_img_raw = angry_birds_sheet.subsurface(rect_orange).copy()
+    orange_bird_image = pygame.transform.scale(orange_bird_img_raw, (34, 34))
+    orange_bird_image_big = pygame.transform.scale(orange_bird_img_raw, (90, 90))
+except ValueError:
+    orange_bird_image = pygame.Surface((34, 34));
+    orange_bird_image.fill((255, 165, 0))
+    orange_bird_image_big = pygame.Surface((90, 90));
+    orange_bird_image_big.fill((255, 165, 0))
 
-# 粉鸟 (来自 angry_birds.png) - 反重力技能
-rect_pink = pygame.Rect(355, 755, 333, 306)
-pink_bird_img_raw = angry_birds_sheet.subsurface(rect_pink).copy()
-# 给粉鸟着色
-pink_tint = pygame.Surface(pink_bird_img_raw.get_size()).convert_alpha()
-pink_tint.fill((255, 105, 180, 100))
-pink_bird_img_raw.blit(pink_tint, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
-pink_bird_image = pygame.transform.scale(pink_bird_img_raw, (30, 24))
+# [粉鸟] 反重力 (使用 angry_birds.png 真实坐标)
+rect_pink = pygame.Rect(94, 1092, 68, 51)
+try:
+    pink_bird_img_raw = angry_birds_sheet.subsurface(rect_pink).copy()
+    pink_bird_image = pygame.transform.scale(pink_bird_img_raw, (30, 24))
+except ValueError:
+    pink_bird_image = pygame.Surface((30, 24));
+    pink_bird_image.fill((255, 192, 203))
 
-# 黄鸟 (用红鸟染黄色) - 加速冲刺技能
-yellow_bird_img_raw = angry_birds_sheet.subsurface(rect_red).copy()
+# [黄鸟] 加速 (无独立素材，使用红鸟染色兜底)
+yellow_bird_img_raw = red_bird_image.copy()
 yellow_tint = pygame.Surface(yellow_bird_img_raw.get_size()).convert_alpha()
-yellow_tint.fill((255, 255, 0, 100))
+yellow_tint.fill((255, 255, 0, 100))  # 黄色遮罩
 yellow_bird_img_raw.blit(yellow_tint, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
-yellow_bird_image = pygame.transform.scale(yellow_bird_img_raw, (28, 28))
+yellow_bird_image = yellow_bird_img_raw  # 已经是30x30了
 
-# 蓝鸟 (用红鸟染蓝色) - 变轻技能
-blue_bird_img_raw = angry_birds_sheet.subsurface(rect_red).copy()
+# [蓝鸟] 分身 (无独立素材，使用红鸟染色兜底)
+blue_bird_img_raw = red_bird_image.copy()
 blue_tint = pygame.Surface(blue_bird_img_raw.get_size()).convert_alpha()
-blue_tint.fill((100, 100, 255, 100))
+blue_tint.fill((100, 100, 255, 100))  # 蓝色遮罩
 blue_bird_img_raw.blit(blue_tint, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
-blue_bird_image = pygame.transform.scale(blue_bird_img_raw, (24, 24))
+blue_bird_image = pygame.transform.scale(blue_bird_img_raw, (24, 24))  # 蓝鸟小一点
 
-# === 裁剪猪的图片 ===
-# 普通猪 (来自 full-sprite.png)
-rect_pig = pygame.Rect(41, 12, 124, 142)
-pig_img_raw = full_sprite.subsurface(rect_pig).copy()
-pig_image = pygame.transform.scale(pig_img_raw, (30, 30))
+# === 2. 小猪素材处理 ===
 
-# 头盔猪 (来自 full-sprite.png) - 给普通猪加灰色表示头盔
-helmet_pig_img_raw = full_sprite.subsurface(rect_pig).copy()
-helmet_tint = pygame.Surface(helmet_pig_img_raw.get_size()).convert_alpha()
-helmet_tint.fill((128, 128, 128, 80))
-helmet_pig_img_raw.blit(helmet_tint, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
-helmet_pig_image = pygame.transform.scale(helmet_pig_img_raw, (34, 34))
+# [普通猪] (使用 full-sprite.png 真实坐标)
+rect_pig = pygame.Rect(181, 1050, 50, 50)
+try:
+    pig_img_raw = full_sprite.subsurface(rect_pig).copy()
+    pig_image = pygame.transform.scale(pig_img_raw, (30, 30))
+except ValueError:
+    pig_image = pygame.Surface((30, 30));
+    pig_image.fill((0, 255, 0))
 
-# 王冠猪 (来自 full-sprite.png) - 用金色表示王冠
-king_pig_img_raw = full_sprite.subsurface(rect_pig).copy()
-king_tint = pygame.Surface(king_pig_img_raw.get_size()).convert_alpha()
-king_tint.fill((255, 215, 0, 80))
-king_pig_img_raw.blit(king_tint, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
-king_pig_image = pygame.transform.scale(king_pig_img_raw, (55, 60))  # 王冠猪比较大
+# [头盔猪] (使用 full-sprite.png 真实坐标)
+rect_helmet = pygame.Rect(824, 537, 92, 87)
+try:
+    helmet_pig_img_raw = full_sprite.subsurface(rect_helmet).copy()
+    helmet_pig_image = pygame.transform.scale(helmet_pig_img_raw, (34, 34))
+except ValueError:
+    helmet_pig_image = pygame.Surface((34, 34));
+    helmet_pig_image.fill((50, 100, 50))
+
+# [王冠猪] (使用 full-sprite.png 真实坐标)
+rect_king = pygame.Rect(41, 12, 124, 142)
+try:
+    king_pig_img_raw = full_sprite.subsurface(rect_king).copy()
+    king_pig_image = pygame.transform.scale(king_pig_img_raw, (55, 60))
+except ValueError:
+    king_pig_image = pygame.Surface((55, 60));
+    king_pig_image.fill((0, 200, 0))
 
 # 裁剪星星图片
 rect = pygame.Rect(0, 0, 200, 200)
@@ -997,7 +1016,7 @@ while running:
 
     # --- 绘图 ---
     screen.fill((130, 200, 100))
-    screen.blit(background5, (0, -50))
+    screen.blit(background2, (0, -50))
     screen.blit(sling_image, (138, 420), pygame.Rect(50, 0, 70, 220))
     for p in bird_path:
         pygame.draw.circle(screen, WHITE, p, 5, 0)
